@@ -68,7 +68,12 @@ namespace
 //==============================================================================
 //  Potard (même construction que QMix : couronne, chapeau, marqueur et ombre solidaires)
 //==============================================================================
-Knob::Knob (LmixEditor& e, String l) : label (std::move (l)), ed (e) {}
+Knob::Knob (LmixEditor& e, String l) : label (std::move (l)), ed (e) 
+{
+    ed.pills.add (this, [this] { return pill(); }, [this] { return ed.font (1, pillFont()); });
+}
+
+Knob::~Knob() { ed.pills.remove (this); }
 
 void Knob::attach (RangedAudioParameter* p, bool bip)
 {
@@ -80,119 +85,104 @@ void Knob::attach (RangedAudioParameter* p, bool bip)
 
 float Knob::angleOf (float v) const { return MathConstants<float>::pi * (-0.75f + 1.5f * v); }
 
+Point<float> Knob::centre() const
+{
+    const float s = ed.sc();
+    const float d = jmin ((float) getWidth(), (float) getHeight() - 13.0f * s);
+    return { getWidth() * 0.5f, d * 0.5f + (1.0f - ringScale) * d * 0.25f };
+}
+
+float Knob::ringRadius() const
+{
+    const float s = ed.sc();
+    const float d = jmin ((float) getWidth(), (float) getHeight() - 13.0f * s);
+    return (d * 0.5f - jmax (2.0f * s, d * 0.04f) - 1.0f * s) * ringScale;
+}
+
+String Knob::valueText() const
+{
+    if (param == nullptr) return {};
+    return format ? format (param->convertFrom0to1 (norm)) : param->getCurrentValueAsText();
+}
+
+void Knob::touchPill() { lastActive = Time::getMillisecondCounterHiRes() * 0.001; }
+
+float Knob::pillAlpha() const
+{
+    // visible pendant le réglage, puis s'efface en fondu ; revient au clic ou dès que la valeur bouge
+    const double idle = Time::getMillisecondCounterHiRes() * 0.001 - lastActive;
+    return (float) jlimit (0.0, 1.0, 1.0 - (idle - 2.5) / 0.35);
+}
+
 void Knob::tick()
 {
+    if (std::abs (norm - lastNorm) > 1.0e-6f) { if (lastNorm >= 0.0f) touchPill(); lastNorm = norm; }
     shownAngle = angleOf (norm);
-    const float tooth = MathConstants<float>::twoPi / 32.0f;
-    const float t = std::abs (shownAngle - prevAngle) / tooth;
+    const float step = MathConstants<float>::twoPi / 40.0f;
+    const float t = std::abs (shownAngle - prevAngle) / step;
+    if (std::abs (shownAngle - prevAngle) > 1.0e-5f) blurDir = shownAngle > prevAngle ? -1.0f : 1.0f;
     prevAngle = shownAngle;
     const float lvl = jlimit (0.0f, 1.6f, (t - 0.15f) / 0.6f);
     const float nb = lvl > blur ? lvl : blur * 0.6f;
     if (std::abs (nb - blur) > 0.002f) { blur = nb < 0.01f ? 0.0f : nb; repaint(); }
+    // face d'alu anodisé précalculée à la résolution physique de l'écran (jamais dans paint)
+    const int px = jmax (8, (int) std::ceil (2.0f * nhrack::faceRadius (ringRadius()) * Component::getApproximateScaleFactorForComponent (this)));
+    if (px != facePx) { facePx = px; face = nhrack::makeAnodisedFace (px); repaint(); }
 }
 
 void Knob::paint (Graphics& g)
 {
     const float s = ed.sc();
-    const float d = jmin ((float) getWidth(), (float) getHeight() - 26.0f * s);
-    const float r = d * 0.5f - 3.5f * s;
-    const Point<float> c (getWidth() * 0.5f, d * 0.5f);
-    const float a = shownAngle;
-    const float alphaAll = enabledLook ? 1.0f : 0.35f;
-    auto P = [&] (float ang, float rad) { return c + Point<float> (std::sin (ang), -std::cos (ang)) * rad; };
-    const float ringW = jmax (2.2f, r * 0.075f) * s / jmax (0.6f, s) * (r > 30.0f * s ? 1.25f : 1.0f);
-
-    // anneau de valeur
-    {
-        Path track; track.addCentredArc (c.x, c.y, r + 2.0f * s, r + 2.0f * s, 0.0f, angleOf (0.0f), angleOf (1.0f), true);
-        g.setColour (col::track.withMultipliedAlpha (alphaAll));
-        g.strokePath (track, PathStrokeType (ringW, PathStrokeType::curved, PathStrokeType::rounded));
-        const float from = bipolar ? 0.0f : angleOf (0.0f);
-        if (std::abs (a - from) > 0.01f)
-        {
-            Path v; v.addCentredArc (c.x, c.y, r + 2.0f * s, r + 2.0f * s, 0.0f, jmin (from, a), jmax (from, a), true);
-            g.setColour (col::accent.withAlpha (0.20f * ed.glow() * alphaAll));
-            g.strokePath (v, PathStrokeType (ringW * 2.4f, PathStrokeType::curved, PathStrokeType::rounded));
-            g.setColour (col::accent.withMultipliedAlpha (alphaAll));
-            g.strokePath (v, PathStrokeType (ringW, PathStrokeType::curved, PathStrokeType::rounded));
-        }
-    }
-    const float rc = r * 0.84f, rcap = r * 0.64f;
-    // ombre portée (vers le bas à droite, lumière en haut à gauche à 45°)
-    {
-        const auto sc = c + Point<float> (1.0f, 1.0f) * (0.10f * r);
-        ColourGradient sh (Colours::black.withAlpha (0.6f * alphaAll), sc.x, sc.y, Colours::transparentBlack, sc.x + rc * 1.18f, sc.y, true);
-        sh.addColour (0.72, Colours::black.withAlpha (0.35f * alphaAll));
-        g.setGradientFill (sh);
-        g.fillEllipse (Rectangle<float> (rc * 2.36f, rc * 2.36f).withCentre (sc));
-    }
-    // couronne crantée (flou de mouvement : moyenne de copies décalées, jamais d'effet stroboscopique)
-    {
-        ColourGradient cg (col::crownLight, c.x - rc * 0.7f, c.y - rc * 0.7f, col::crownDark, c.x + rc * 0.7f, c.y + rc * 0.7f, false);
-        g.setGradientFill (cg);
-        g.setOpacity (alphaAll);
-        g.fillEllipse (Rectangle<float> (rc * 2, rc * 2).withCentre (c));
-        g.setOpacity (1.0f);
-        constexpr int nTeeth = 32;
-        const float tooth = MathConstants<float>::twoPi / nTeeth;
-        const float bl = jmin (blur, 1.0f);
-        const int copies = blur > 0.01f ? 1 + (int) std::ceil (bl * 10.0f) : 1;
-        const float spread = bl * tooth;
-        for (int k = 0; k < copies; ++k)
-        {
-            const float off = copies > 1 ? -spread * (float) k / (float) (copies - 1) : 0.0f;
-            const float al = (1.0f / (float) copies) * (blur > 1.0f ? jmax (0.4f, 1.0f - (blur - 1.0f)) : 1.0f) * alphaAll;
-            for (int i = 0; i < nTeeth; ++i)
-            {
-                const float ang = a + off + tooth * (float) i;
-                const float lit = 0.5f + 0.5f * std::cos (ang - (-MathConstants<float>::pi * 0.25f));
-                g.setColour (Colour::greyLevel (0.16f + 0.42f * lit).withAlpha (0.85f * al));
-                g.drawLine (Line<float> (P (ang, rc * 0.80f), P (ang, rc * 0.985f)), 1.3f * s * (r > 30.0f * s ? 1.4f : 1.0f));
-                g.setColour (Colours::black.withAlpha (0.55f * al));
-                g.drawLine (Line<float> (P (ang + tooth * 0.42f, rc * 0.80f), P (ang + tooth * 0.42f, rc * 0.985f)), 1.0f * s);
-            }
-        }
-        g.setColour (Colours::black.withAlpha (0.6f * alphaAll));
-        g.drawEllipse (Rectangle<float> (rc * 2, rc * 2).withCentre (c), 0.8f * s);
-    }
-    // chapeau
-    {
-        ColourGradient cap (col::capLight, c.x - rcap * 0.75f, c.y - rcap * 0.75f, col::capDark, c.x + rcap * 0.8f, c.y + rcap * 0.8f, false);
-        g.setGradientFill (cap);
-        g.setOpacity (alphaAll);
-        g.fillEllipse (Rectangle<float> (rcap * 2, rcap * 2).withCentre (c));
-        g.setOpacity (1.0f);
-        g.setColour (Colours::black.withAlpha (0.45f * alphaAll));
-        Path sh; sh.addCentredArc (c.x, c.y, rcap + 0.6f * s, rcap + 0.6f * s, 0.0f, MathConstants<float>::pi * 0.15f, MathConstants<float>::pi * 1.35f, true);
-        g.strokePath (sh, PathStrokeType (1.6f * s));
-        Path hl; hl.addCentredArc (c.x, c.y, rcap - 0.8f * s, rcap - 0.8f * s, 0.0f, -MathConstants<float>::pi * 0.62f, MathConstants<float>::pi * 0.12f, true);
-        g.setColour (Colours::white.withAlpha (0.20f * alphaAll));
-        g.strokePath (hl, PathStrokeType (1.0f * s, PathStrokeType::curved, PathStrokeType::rounded));
-        const auto hc = c + Point<float> (-0.32f, -0.34f) * rcap;
-        ColourGradient spec (Colours::white.withAlpha (0.14f * alphaAll), hc.x, hc.y, Colours::transparentWhite, hc.x + rcap * 0.75f, hc.y, true);
-        g.setGradientFill (spec);
-        g.fillEllipse (Rectangle<float> (rcap * 2, rcap * 2).withCentre (c));
-    }
-    // marqueur
-    {
-        const float mw = r > 30.0f * s ? 2.6f * s : 1.9f * s;
-        g.setColour (col::accent.withAlpha (0.25f * ed.glow() * alphaAll));
-        g.drawLine (Line<float> (P (a, rcap * 0.28f), P (a, rcap * 0.92f)), mw * 2.1f);
-        g.setColour (col::marker.withAlpha (0.95f * alphaAll));
-        g.drawLine (Line<float> (P (a, rcap * 0.28f), P (a, rcap * 0.92f)), mw);
-    }
-    // valeur + nom
-    const auto tr = Rectangle<float> (-20.0f * s, d + 1.0f * s, (float) getWidth() + 40.0f * s, 13.0f * s);
-    g.setFont (ed.font (1, valueFont * s));
-    g.setColour (col::text.withAlpha (alphaAll));
-    g.drawText (param != nullptr && format ? format (param->convertFrom0to1 (norm)) : String(), tr, Justification::centred, false);
+    const bool en = enabledLook;
+    nhrack::Look k;
+    k.c = centre(); k.ring = ringRadius(); k.angle = shownAngle;
+    k.a0 = angleOf (0.0f); k.a1 = angleOf (1.0f); k.from = bipolar ? 0.0f : k.a0;
+    k.s = s; k.glow = ed.glow(); k.alpha = en ? 1.0f : 0.35f; k.blur = blur; k.blurDir = blurDir;
+    k.colour = colour; k.face = &face;
+    nhrack::paintKnob (g, k);
+    // nom sous le potard (la valeur est dans la pastille au bout de l'anneau)
     g.setFont (ed.font (2, 8.4f * s).withExtraKerningFactor (0.14f));
-    g.setColour (col::dim.withAlpha (alphaAll));
-    g.drawText (label, tr.translated (0.0f, 12.5f * s), Justification::centred, false);
+    g.setColour ((col::dim).withMultipliedAlpha (k.alpha));
+    g.drawText (label, labelBox(), Justification::centred, false);
+}
+
+Rectangle<float> Knob::labelBox() const
+{
+    const float s = ed.sc();
+    const float ly = jmin ((float) getHeight() - 12.0f * s, centre().y + ringRadius() + 7.0f * s);
+    return Rectangle<float> (-20.0f * s, ly, (float) getWidth() + 40.0f * s, 11.0f * s);
+}
+
+float Knob::pillFont() const
+{
+    const float s = ed.sc();
+    return jlimit (valueFont, 10.5f, ringRadius() / s * 0.19f) * s;
+}
+
+nhrack::PillOverlay::Pill Knob::pill() const
+{
+    nhrack::PillOverlay::Pill p;
+    if (param == nullptr) return p;
+    const float s = ed.sc();
+    p.text = valueText();
+    const Font f = ed.font (1, pillFont());
+    p.r = nhrack::pillRect (centre(), ringRadius(), angleOf (norm), p.text, f, s);
+    { const float rr = ringRadius() * 0.92f; p.ringBox = Rectangle<float> (rr * 2, rr * 2).withCentre (centre()); }
+    {
+        const auto lb = labelBox();
+        const float lw = GlyphArrangement::getStringWidth (ed.font (2, 8.4f * s).withExtraKerningFactor (0.14f), label) + 4.0f * s;
+        if (lw > 5.0f * s) p.labelBox = Rectangle<float> (lw, 9.0f * s).withCentre ({ lb.getCentreX(), lb.getY() + 5.5f * s });
+    }
+    p.c = centre(); p.ring = ringRadius(); p.angle = angleOf (norm); p.gap = 3.5f * s;
+    p.colour = colour;
+    p.alpha = pillAlpha() * (((enabledLook)) ? 1.0f : 0.35f);
+    p.visible = p.alpha > 0.001f;
+    return p;
 }
 
 void Knob::mouseDown (const MouseEvent& e)
 {
+    touchPill();
     if (param == nullptr) return;
     if (e.mods.isPopupMenu()) { if (extraMenu) extraMenu(); else ed.showParamMidiMenu (param, param->getName (64)); return; }
     dragging = true; dragStart = norm;
@@ -210,6 +200,7 @@ void Knob::mouseDrag (const MouseEvent& e)
 
 void Knob::mouseUp (const MouseEvent& e)
 {
+    touchPill();
     if (! dragging) return;
     dragging = false;
     att->endGesture();
@@ -218,11 +209,13 @@ void Knob::mouseUp (const MouseEvent& e)
 
 void Knob::mouseDoubleClick (const MouseEvent&)
 {
+    touchPill();
     if (param != nullptr) att->setValueAsCompleteGesture (param->convertFrom0to1 (param->getDefaultValue()));
 }
 
 void Knob::mouseWheelMove (const MouseEvent& e, const MouseWheelDetails& w)
 {
+    touchPill();
     if (param == nullptr) return;
     const float step = (e.mods.isShiftDown() ? 0.005f : 0.03f) * (w.deltaY >= 0 ? 1.0f : -1.0f) * jmin (1.0f, std::abs (w.deltaY) * 4.0f);
     att->setValueAsCompleteGesture (param->convertFrom0to1 (jlimit (0.0f, 1.0f, norm + step)));
@@ -708,7 +701,6 @@ LmixEditor::LmixEditor (LmixProcessor& p)
     addAndMakeVisible (meters);
     auto& ap = proc.apvts;
     gainKnob.attach (ap.getParameter ("gain"), false);       gainKnob.format = [] (float v) { return dbStr (v); };
-    gainKnob.valueFont = 13.0f;
     ceilKnob.attach (ap.getParameter ("ceiling"), false);    ceilKnob.format = [this] (float v) { return String (v, 1) + (proc.prm.truePeak->load() > 0.5f ? " dBTP" : " dBFS"); };
     attackKnob.attach (ap.getParameter ("attack"), false);   attackKnob.format = [] (float v) { return String ((int) std::round (v)) + " %"; };
     releaseKnob.attach (ap.getParameter ("release"), false);
@@ -722,6 +714,7 @@ LmixEditor::LmixEditor (LmixProcessor& p)
     clipKnob.attach (ap.getParameter ("clip"), false);       clipKnob.format = [] (float v) { return String ((int) std::round (v)) + " %"; };
     for (auto* k : { &gainKnob, &ceilKnob, &attackKnob, &releaseKnob, &lookKnob, &linkTKnob, &linkRKnob, &transKnob, &enhKnob, &clipKnob })
         addAndMakeVisible (k);
+    addAndMakeVisible (pills);
 
     setResizable (true, true);
     setResizeLimits (kW, kH, kMaxW, kMaxH);
@@ -757,7 +750,10 @@ void LmixEditor::resized()
     ceilKnob.setBounds (R (826, 384, 70, 84));
     int i = 0;
     for (auto* k : { &attackKnob, &releaseKnob, &lookKnob, &linkTKnob, &linkRKnob, &transKnob, &enhKnob, &clipKnob })
-        k->setBounds (R (190.0f + 70.0f * (float) i++, 418, 66, 72));
+    { k->ringScale = 0.8f; k->setBounds (R (190.0f + 70.0f * (float) i++, 418, 66, 72)); }
+    gainKnob.ringScale = 0.88f; ceilKnob.ringScale = 0.86f;
+    pills.setBounds (getLocalBounds());
+    pills.toFront (false);
     hostLock.setMinimumSize (kW, kH);
 }
 
@@ -1302,4 +1298,5 @@ void LmixEditor::timerCallback()
     display.tick();
     meters.tick();
     for (auto* k : { &gainKnob, &ceilKnob, &attackKnob, &releaseKnob, &lookKnob, &linkTKnob, &linkRKnob, &transKnob, &enhKnob, &clipKnob }) k->tick();
+    pills.update();
 }

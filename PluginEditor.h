@@ -3,6 +3,7 @@
 #include "PluginProcessor.h"
 #include "LmixMenu.h"
 #include "WindowMinSize.h"
+#include "NhRackKnob.h"
 
 class LmixEditor;
 
@@ -28,6 +29,7 @@ namespace LmixUi
     {
     public:
         Knob (LmixEditor& e, String labelText);
+        ~Knob() override;
         void attach (RangedAudioParameter* p, bool bipolar);
         void paint (Graphics&) override;
         void mouseDown (const MouseEvent&) override;
@@ -36,16 +38,30 @@ namespace LmixUi
         void mouseDoubleClick (const MouseEvent&) override;
         void mouseWheelMove (const MouseEvent&, const MouseWheelDetails&) override;
         void tick();                              // 30 Hz : flou de mouvement
+        Point<float> centre() const;
+        float ringRadius() const;
+        String valueText() const;
+        Rectangle<float> labelBox() const;
+        float pillFont() const;
+        float pillAlpha() const;
+        void touchPill();
+        nhrack::PillOverlay::Pill pill() const;
+        float ringScale = 1.0f;   // < 1 : potards serrés, laisse de la place à la pastille
+        Colour colour { col::accent };
         RangedAudioParameter* param = nullptr;
         String label;
         bool bipolar = false, enabledLook = true;
-        float valueFont = 11.5f;
+        float valueFont = 7.8f;
         std::function<String (float)> format;
         std::function<void()> extraMenu;          // menu clic droit propre (sinon MIDI)
     private:
         LmixEditor& ed;
         std::unique_ptr<ParameterAttachment> att;
-        float norm = 0.0f, dragStart = 0.0f, shownAngle = 0.0f, prevAngle = 0.0f, blur = 0.0f;
+        float norm = 0.0f, dragStart = 0.0f, shownAngle = 0.0f, prevAngle = 0.0f, blur = 0.0f, blurDir = 1.0f;
+        Image face;               // face d'alu anodisé précalculée (timer)
+        int facePx = 0;
+        double lastActive = -100.0;   // dernière action (clic, molette, valeur qui bouge)
+        float lastNorm = -1.0f;
         bool dragging = false;
         float angleOf (float v) const;
     };
@@ -137,6 +153,7 @@ public:
 
     LmixUi::Display display;
     LmixUi::Meters meters;
+    nhrack::PillOverlay pills;                        // pastilles de valeur, au-dessus de tout (déclaré avant les potards)
     LmixUi::Knob gainKnob, ceilKnob, attackKnob, releaseKnob, lookKnob, linkTKnob, linkRKnob, transKnob, enhKnob, clipKnob;
 
 private:
