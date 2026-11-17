@@ -138,6 +138,15 @@ int main (int argc, char**)
         std::cout << "Sonie : sinus 997 Hz -23 dBFS -> integree " << String (lmix::Loudness::integrated (h), 2) << " LUFS, court terme " << String (p.shortTerm.load(), 2) << "\n";
     }
 
+    //-------------------------------------------------------------- latences
+    for (double f : { 44100.0, 48000.0, 96000.0 })
+    {
+        LmixProcessor p; p.setPlayConfigDetails (2, 2, f, B); p.prepareToPlay (f, B);
+        std::cout << "Latence a " << f << " Hz :";
+        for (int i = 0; i < 6; ++i) std::cout << "  " << LmixProcessor::osFactor (i) << "x " << p.latencyFor (i) << " (" << String (1000.0 * p.latencyFor (i) / f, 1) << " ms)";
+        std::cout << "\n";
+    }
+
     //-------------------------------------------------------------- 4. captures
     auto runWith = [&] (LmixProcessor& p, LmixEditor& ed, double secs)
     {
