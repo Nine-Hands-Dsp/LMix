@@ -69,7 +69,10 @@ LmixProcessor::LmixProcessor()
             g ("xo1"), g ("xo2"), g ("xo3") };
 
     for (int i = 0; i < 6; ++i)
-        osObj[i] = std::make_unique<dsp::Oversampling<float>> (2, (size_t) i, dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, true);
+    {
+        osObj[i]   = std::make_unique<dsp::Oversampling<float>> (2, (size_t) i, dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, true);
+        clipOs[i]  = std::make_unique<dsp::Oversampling<float>> (2, (size_t) i, dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, true);
+    }
     for (auto& v : inPeak) v = 0.0f;
     for (auto& v : outPeak) v = 0.0f;
     for (auto& v : bandGr) v = 0.0f;
@@ -91,7 +94,8 @@ bool LmixProcessor::isBusesLayoutSupported (const BusesLayout& l) const
 int LmixProcessor::latencyFor (int osIdx) const
 {
     const int osLat = (int) std::lround (osObj[jlimit (0, 5, osIdx)]->getLatencyInSamples());
-    return (int) std::lround (0.002 * sr) + osLat + Dbase + 2 * lmix::SafetyLimiter::W + jmax (2, (int) std::lround (0.001 * sr)) - 1;
+    // multibande (2 ms) + écrêteur suréchantillonné + limiteur suréchantillonné + avance (5 ms) + sécurité
+    return (int) std::lround (0.002 * sr) + 2 * osLat + Dbase + 2 * lmix::SafetyLimiter::W + jmax (2, (int) std::lround (0.001 * sr)) - 1;
 }
 
 void LmixProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
@@ -100,6 +104,8 @@ void LmixProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     currentRate = sampleRate;
     maxBlock = jmax (64, samplesPerBlock);
     for (auto& o : osObj) { o->initProcessing ((size_t) maxBlock); o->reset(); }
+    for (auto& o : clipOs) { o->initProcessing ((size_t) maxBlock); o->reset(); }
+    lastRaise = 0.0;
     Dbase = (int) std::lround (0.005 * sr);                                  // avance maximale : 5 ms
     mbStage.prepare (sr, (int) std::lround (0.002 * sr));
     mbStage.setCrossovers (prm.xo1->load(), prm.xo2->load(), prm.xo3->load());
@@ -131,15 +137,17 @@ void LmixProcessor::configure (int osIdx)
     activeOs = jlimit (0, 5, osIdx);
     const int f = osFactor (activeOs);
     osObj[activeOs]->reset();
+    clipOs[activeOs]->reset();
+    lastRaise = 0.0;
     main.prepare (sr * f, f, Dbase * f);                                     // capacité déjà réservée : pas d'allocation
     safety.reset();
     mbStage.reset();
     const int osLat = (int) std::lround (osObj[activeOs]->getLatencyInSamples());
     const int lat = latencyFor (activeOs);
-    for (auto& d : refDl) { d.clear(); d.setDelay (osLat + Dbase + safety.delay()); }
+    for (auto& d : refDl) { d.clear(); d.setDelay (2 * osLat + Dbase + safety.delay()); }
     for (auto& d : dryDl) { d.clear(); d.setDelay (lat); }
     latencyNow = lat;
-    jassert (lat == mbStage.latency() + osLat + Dbase + safety.delay());
+    jassert (lat == mbStage.latency() + 2 * osLat + Dbase + safety.delay());
 }
 
 //==============================================================================
@@ -253,12 +261,22 @@ void LmixProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
     }
     for (int b = 0; b < lmix::MultibandStage::kBands; ++b) bandGr[b] = (float) mbStage.bandGrDb[b];
 
-    //-------------------------------------------------------------- 2. suréchantillonné : écrêteur + limiteur principal
+    //-------------------------------------------------------------- 2. suréchantillonné : écrêteur (étage à part), puis limiteur principal
     float* grBase = grBuf.data();
     const int f = osFactor (activeOs);
+    main.setParams (mp);
+    clipper.setParams (mp);
     {
         float* chans[2] = { wL, wR };
         dsp::AudioBlock<float> blk (chans, 2, (size_t) n);
+        // écrêteur : suréchantillonné puis redescendu, pour que le limiteur voie un signal à bande limitée
+        // (sinon les angles de l'écrêtage ressortent en dépassements après le filtre de sortie)
+        const double raise = main.slowGrDb();
+        auto cu = clipOs[activeOs]->processSamplesUp (blk);
+        clipper.process (cu.getChannelPointer (0), cu.getChannelPointer (1), (int) cu.getNumSamples(), lastRaise, raise);
+        clipOs[activeOs]->processSamplesDown (blk);
+        lastRaise = raise;
+
         auto up = osObj[activeOs]->processSamplesUp (blk);
         float* uL = up.getChannelPointer (0); float* uR = up.getChannelPointer (1);
         const int nu = (int) up.getNumSamples();
@@ -266,7 +284,7 @@ void LmixProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
         for (int j = 0; j < nu; ++j)
         {
             double a = uL[j], b = uR[j];
-            main.process (a, b, mp);
+            main.process (a, b);
             uL[j] = (float) a; uR[j] = (float) b;
             if ((j + 1) % f == 0 && k < n) grBase[k++] = (float) -lmix::gainToDb (main.takeMinGain());
         }
@@ -284,14 +302,18 @@ void LmixProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi)
     float grBlockMax = 0;
     float* oL = buffer.getWritePointer (0);
     float* oR = numCh > 1 ? buffer.getWritePointer (1) : nullptr;
+    // avec le dither, le plafond garde 2 pas de quantification de marge (le bruit ajouté ne le dépasse jamais)
+    const double ceilSafe = ditherIdx > 0 ? ceilLin - 2.0 / (double) (1 << (bits - 1)) : ceilLin;
     for (int i = 0; i < n; ++i)
     {
         double y[2] = { wL[i], wR[i] };
-        safety.process (y[0], y[1], ceilLin, tp);
+        safety.process (y[0], y[1], ceilSafe, tp);
         const double rf[2] = { refDl[0].push (rL[i]), refDl[1].push (rR[i]) };
         // mesures (sortie limitée, avant écoute / dither)
         if (numCh > 1) loud.process (y[0], y[1]); else loud.process (y[0], 0.0);
         outPk[0] = jmax (outPk[0], (float) std::abs (y[0])); outPk[1] = jmax (outPk[1], (float) std::abs (y[1]));
+        if (safety.grOut > 0.01) { ++statSafetyActive; statSafetyMax = jmax (statSafetyMax, safety.grOut); statSafetySum += safety.grOut; if (safety.grOut > 0.1) ++statSafety01; }
+        ++statSamples;
         const float gr = grBase[i] + (float) safety.grOut;
         grBlockMax = jmax (grBlockMax, gr);
         histIn = jmax (histIn, (float) jmax (std::abs (rf[0]), std::abs (rf[1])));   // avant limitation, aligné sur la sortie

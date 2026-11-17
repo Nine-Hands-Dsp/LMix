@@ -15,16 +15,18 @@ Limiteur de mastering VST3 (Windows et macOS) : true peak garanti (mesure BS.177
 
 - **Plafond garanti** : la sortie ne dépasse jamais le plafond, ni en crête d'échantillon, ni en true peak. Un étage de sécurité final vérifie les crêtes entre échantillons avec le filtre officiel BS.1770-4 (celui des plateformes) et avec un interpolateur 8x plus fin.
 - **Moteur à deux enveloppes** (dans l'esprit de Pro-L 2) :
-  - une enveloppe rapide avec avance (0 à 5 ms) qui attrape les crêtes sans distorsion ;
+  - une enveloppe rapide avec avance (0 à 5 ms) qui attrape les crêtes, crêtes entre échantillons comprises ;
+  - un maintien calé automatiquement sur la demi-période du grave, pour ne pas déformer les basses ;
   - une enveloppe lente qui nivelle le corps du signal.
+- **Distorsion mesurée** (THD+N, sinus 6 dB au-dessus du plafond, 4x) : −72 dB à 40 Hz, −81 dB à 100 Hz et −89 dB à 1 kHz en Modern et dans tous les styles sans écrêtage.
 - **Relâchement adaptatif** (dans l'esprit d'ARC chez Waves et d'IRC chez Ozone) : il s'allonge sur la musique dense et se raccourcit sur les transitoires isolées.
 - **8 styles** : Transparent, Punch, Dynamic, Loud, Bus, Safe, Modern, Aggressive.
 - **TRANSIENT** : relâchement accéléré et nivellement suspendu sur les attaques, pour garder le punch.
 - **ENHANCE** : remonte les détails faibles (compression vers le haut), dans l'esprit de Weiss et Sonnox.
-- **CLIP** : écrêteur doux avant le limiteur, au taux suréchantillonné.
+- **CLIP** : écrêteur doux avant le limiteur, dans son propre étage suréchantillonné. Il ne coupe que les crêtes courtes au-dessus du niveau déjà nivelé, jamais un son tenu.
 - **Liaison stéréo** séparée pour les transitoires et pour le relâchement.
 - **Suréchantillonnage** 1x à 32x, en phase linéaire.
-- **Multibande** : 4 bandes Linkwitz-Riley. La réduction est confiée à la bande qui dépasse (dans l'esprit du L3 de Waves), avec les fréquences de coupure réglables à la souris.
+- **Multibande** : 4 bandes à reconstruction parfaite (la somme redonne exactement le signal, sans rotation de phase). La bande dominante prend la part tenue de la réduction (dans l'esprit du L3 de Waves), le limiteur principal garde les crêtes. Fréquences de coupure réglables à la souris.
 - **Mesures** :
   - LUFS intégré, court terme et momentané (EBU R128 / ITU-R BS.1770-4), LRA (EBU Tech 3342), true peak et PLR ;
   - cibles Spotify, Apple Music, YouTube, Amazon, Deezer, SoundCloud, CD / Club, EBU R128 et ATSC, avec « Match gain to target » ;
@@ -53,7 +55,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
-`tools/render` compile le plugin sous Linux et vérifie plusieurs points :
+`tools/render` compile le plugin sous Linux et vérifie plusieurs points (`LmixRender analyse` mesure en plus la distorsion, le repliement, le travail de l'étage de sécurité, le multibande et la charge processeur) :
 - le plafond true peak, pour chaque suréchantillonnage et chaque style ;
 - la latence annoncée ;
 - l'écoute DELTA ;
@@ -65,4 +67,5 @@ Il exporte aussi les captures de la notice.
 
 | Version | Changements |
 |---|---|
+| 1.1.0 | Moteur optimisé : maintien calé sur le grave (distorsion des basses divisée par plus de 100), écrêteur suréchantillonné à part qui ne coupe que les crêtes courtes, détection des crêtes entre échantillons dans le limiteur principal, multibande à reconstruction parfaite et nouvelle répartition, marge de dither, calculs par bloc. |
 | 1.0.0 | Première version. |

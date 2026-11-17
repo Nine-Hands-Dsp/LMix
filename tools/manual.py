@@ -153,15 +153,16 @@ f.append(table([["Étage", "Rôle"],
                 ["GAIN", "Monte (ou baisse) le signal avant tout le reste, de −12 à +30 dB."],
                 ["Filtre DC", "Retire une éventuelle composante continue (passe-haut 5 Hz). Actif par défaut, clic droit &gt; DC offset filter."],
                 ["ENHANCE", "Compression vers le haut des passages faibles (si ENHANCE &gt; 0)."],
-                ["MULTIBAND", "4 bandes, réduction confiée à la bande qui dépasse (si MULTIBAND est allumé, section 7)."],
-                ["Suréchantillonnage", "1x à 32x (bouton OS) : tout ce qui suit travaille à une fréquence plus élevée, donc avec moins de repliement et des crêtes plus fidèles."],
-                ["CLIP", "Écrêteur doux qui arrondit les crêtes les plus courtes avant le limiteur."],
-                ["Limiteur principal", "Deux enveloppes + avance (ci-dessous)."],
+                ["MULTIBAND", "4 bandes à reconstruction parfaite, la bande dominante prend la part tenue de la réduction (si MULTIBAND est allumé, section 7)."],
+                ["CLIP", "Écrêteur doux dans son propre étage suréchantillonné : il arrondit seulement les crêtes courtes, puis le signal est refiltré pour que le limiteur voie un signal propre."],
+                ["Suréchantillonnage", "1x à 32x (bouton OS) : le limiteur travaille à une fréquence plus élevée, donc avec moins de repliement et des crêtes plus fidèles."],
+                ["Limiteur principal", "Deux enveloppes + avance + maintien calé sur le grave (ci-dessous)."],
                 ["Sécurité true peak", "Dernier contrôle, au taux d'origine : garantit le plafond, crêtes entre échantillons comprises."],
                 ["Écoute, dither", "UNITY, DELTA, puis dither en toute fin de chaîne."]],
                [34 * mm, W - 34 * mm]))
 f.append(P("Deux enveloppes", "h2"))
-f += bullets(["<b>L'enveloppe rapide</b> suit chaque crête. Grâce à l'avance (LOOKAHEAD), LMix « voit » la crête arriver et descend le gain en douceur juste avant, au lieu de la couper net : pas de distorsion sur l'attaque. Elle remonte ensuite vers le niveau de l'enveloppe lente.",
+f += bullets(["<b>L'enveloppe rapide</b> suit chaque crête, y compris celles qui tombent entre deux échantillons (estimées au taux suréchantillonné). Grâce à l'avance (LOOKAHEAD), LMix « voit » la crête arriver et descend le gain en douceur juste avant, au lieu de la couper net : pas de distorsion sur l'attaque.",
+              "<b>Le maintien</b> : avant de remonter, l'enveloppe rapide attend une demi-période du grave, mesurée en continu (jusqu'à 9 à 30 ms selon le style, moins sur les attaques). Le gain ne suit plus chaque oscillation d'une basse ou d'une corde grave : c'est ce qui supprime la distorsion des basses. Elle remonte ensuite vers le niveau de l'enveloppe lente.",
               "<b>L'enveloppe lente</b> suit une part de la réduction (selon le style) avec une attaque plus lente. Elle « nivelle » le corps du signal : sur un passage dense, le gain descend un peu et y reste, si bien que l'enveloppe rapide a moins à faire. C'est ce qui permet de pousser fort sans pompage ni distorsion.",
               "Le gain appliqué est le plus bas des deux, jamais plus haut que ce qu'il faut pour respecter le plafond."])
 f.append(P("Relâchement adaptatif (AUTO)", "h2"))
@@ -169,6 +170,14 @@ f.append(P("LMix mesure en continu le facteur de crête du signal (écart entre 
 f.append(P("Plafond garanti", "h2"))
 f.append(P("Construction mathématique : le gain appliqué à chaque échantillon ne dépasse jamais le gain requis par ses voisins. L'étage de sécurité final mesure les crêtes entre les échantillons de deux façons : avec le filtre officiel de la norme <b>ITU-R BS.1770-4</b> (celui des vumètres des plateformes) et avec un interpolateur 8x plus fin, puis il garde la plus haute des deux."))
 f.append(P("Vérification sur une musique de test poussée de +14 dB, plafond −1,0 dBTP, 1x / 4x / 8x / 32x, styles Transparent, Punch (multibande), Loud, Modern et Aggressive : crête mesurée −1,000 dBTP dans tous les cas, avec les deux méthodes de mesure. Sur un signal sans réduction, le traitement est transparent (écart de gain 0,002 dB).", "small"))
+f.append(P("Distorsion mesurée", "h2"))
+f.append(P("THD+N (harmoniques + bruit, de 20 Hz à 20 kHz) sur un sinus tenu 6 dB au-dessus du plafond, suréchantillonnage 4x :"))
+f.append(table([["Style", "40 Hz", "100 Hz", "1 kHz"],
+                ["Transparent, Punch, Dynamic, Bus, Safe, Modern", "−72 dB", "−81 dB", "−89 dB"],
+                ["Loud (écrêtage interne)", "−39 dB", "−54 dB", "−82 dB"],
+                ["Aggressive (saturé par choix)", "−24 dB", "−23 dB", "−24 dB"]],
+               [70 * mm, (W - 70 * mm) / 3, (W - 70 * mm) / 3, (W - 70 * mm) / 3]))
+f.append(P("Sur un son tenu, le gain reste stable au lieu de suivre la forme d'onde : un sinus de 9 kHz limité de 6 dB ressort sans aucun produit de distorsion mesurable (−138 dB), à tous les suréchantillonnages.", "small"))
 
 # ---------- 5. Réglages ----------
 f.append(P("5. Les réglages", "h1"))
@@ -180,11 +189,11 @@ f.append(table([["Style", "Caractère", "Ce qui change"],
                 ["Transparent", "Le plus propre, nivellement lent", "Enveloppe lente très présente (90 %), relâchement lent ; aucun écrêtage."],
                 ["Punch", "Garde la grosse caisse et la caisse claire", "Remonte vite après chaque frappe ; détection des transitoires forte (60 %)."],
                 ["Dynamic", "Garde le plus de dynamique", "Genou doux de 3 dB, peu de nivellement (30 %)."],
-                ["Loud", "Rapide, dense et fort", "Relâchement court, écrêtage interne 30 %."],
+                ["Loud", "Rapide, dense et fort", "Relâchement court, écrêtage interne 30 % (sur les crêtes courtes)."],
                 ["Bus", "Colle un bus ou des stems", "Genou doux de 2 dB, relâchement plus long et souple."],
                 ["Safe", "Lent et sûr, distorsion minimale", "Tout le travail sur l'enveloppe lente, relâchement le plus long."],
-                ["Modern", "Master moderne fort et clair (par défaut)", "Nivellement 75 %, relâchement court, écrêtage interne 20 %, transitoires 40 %."],
-                ["Aggressive", "Dur, en avant, saturé", "Relâchement très court, écrêtage interne 50 %."]],
+                ["Modern", "Master moderne fort et clair (par défaut)", "Nivellement 75 %, relâchement court, écrêtage interne 20 % (sur les crêtes courtes), transitoires 40 %."],
+                ["Aggressive", "Dur, en avant, saturé", "Relâchement très court, maintien court, écrêtage interne 50 % : sature aussi les sons forts tenus, par choix."]],
                [24 * mm, 52 * mm, W - 76 * mm]))
 f.append(P("L'écrêtage et la détection de transitoires internes d'un style s'ajoutent aux potards CLIP et TRANSIENT (qui vont alors de la valeur du style à 100 %). Clic droit sur un style : MIDI Learn du style.", "small"))
 f.append(P("Réglages fins", "h2"))
@@ -197,7 +206,7 @@ f.append(table([["Réglage", "Plage", "Rôle"],
                 ["LINK REL.", "0 à 100 % (50 %)", "Liaison stéréo du relâchement : plus bas, chaque côté remonte de lui-même (image plus large, possible flottement)."],
                 ["TRANSIENT", "0 à 100 % (0 %)", "Sur une attaque, accélère le relâchement (jusqu'à 5 fois) et suspend le nivellement : l'impact passe, le corps n'est pas écrasé."],
                 ["ENHANCE", "0 à 100 % (0 %)", "Remonte les passages plus faibles que la moyenne des 3 dernières secondes, jusqu'à +6 dB à 100 % (jamais sous −60 dBFS, donc pas sur le silence)."],
-                ["CLIP", "0 à 100 % (0 %)", "Écrêteur doux avant le limiteur : seuil de +6 dB au-dessus du plafond (peu) jusqu'au plafond (100 %). Rend plus fort sur les crêtes très courtes."]],
+                ["CLIP", "0 à 100 % (0 %)", "Écrêteur doux avant le limiteur : seuil de +6 dB au-dessus du plafond (peu) jusqu'au plafond (100 %), relevé de la réduction déjà portée par l'enveloppe lente. Il ne coupe donc que les crêtes courtes qui dépassent le niveau nivelé, et le limiteur a moins à faire."]],
                [24 * mm, 30 * mm, W - 54 * mm]))
 f.append(P("Potards : glisser verticalement (Maj : réglage fin), molette, <b>double-clic</b> : valeur par défaut, <b>clic droit</b> : MIDI Learn.", "small"))
 
@@ -211,18 +220,18 @@ ot.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0,
 f.append(ot)
 f += bullets(["<b>OS</b> (suréchantillonnage) : clic pour choisir 1x à 32x (4x par défaut, phase linéaire). Plus haut : moins de repliement quand le limiteur et l'écrêteur travaillent fort, au prix du processeur. 8x est un bon choix pour le rendu final ; 32x demande environ 4 fois plus de calcul que 4x.",
               "<b>UNITY</b> : baisse la sortie de la valeur du GAIN, pour comparer avec et sans limitation au même volume. À couper avant l'export.",
-              "<b>DELTA</b> : on n'entend que ce que le limiteur retire (différence entre l'entrée et la sortie). Idéal pour régler RELEASE et le style : si on y entend la musique, c'est trop. Sans réduction, le résidu est à −69 dB.",
+              "<b>DELTA</b> : on n'entend que ce que le limiteur retire (différence entre l'entrée et la sortie). Idéal pour régler RELEASE et le style : si on y entend la musique, c'est trop. Sans réduction, le résidu est à −63 dB.",
               "<b>DITHER</b> : clic pour Off, 16 bit (CD) ou 24 bit, et <b>Noise shaping</b> (mise en forme du bruit vers l'aigu, moins audible). Dither TPDF, en toute fin de chaîne ; à activer seulement pour l'export final à la résolution choisie. Coupé en DELTA.",
               "<b>MULTIBAND</b> : section 7."])
 f.append(table([["Suréchantillonnage", "1x", "2x", "4x", "8x", "16x", "32x"],
-                ["Latence à 44,1 kHz", "8,5 ms", "9,6 ms", "9,9 ms", "10,0 ms", "10,0 ms", "10,1 ms"],
-                ["Latence à 48 kHz", "8,5 ms", "9,5 ms", "9,8 ms", "9,8 ms", "9,9 ms", "9,9 ms"]],
+                ["Latence à 44,1 kHz", "8,5 ms", "10,7 ms", "11,3 ms", "11,5 ms", "11,6 ms", "11,6 ms"],
+                ["Latence à 48 kHz", "8,5 ms", "10,5 ms", "11,0 ms", "11,2 ms", "11,3 ms", "11,3 ms"]],
                [36 * mm] + [(W - 36 * mm) / 6] * 6))
 f.append(P("La latence est annoncée au DAW, qui la compense ; elle ne change qu'avec le suréchantillonnage (LOOKAHEAD, MULTIBAND et TRUE PEAK n'y touchent pas). Changer de suréchantillonnage fait un court fondu (30 ms).", "small"))
 
 # ---------- 7. Multibande ----------
 f.append(P("7. Mode multibande", "h1"))
-f.append(P("Avec <b>MULTIBAND</b>, le signal est partagé en 4 bandes (filtres Linkwitz-Riley 24 dB/oct, dont la somme reste plate). LMix calcule la réduction nécessaire, puis la confie à la bande qui dépasse : la bande dominante prend toute la réduction, les autres en proportion de leur niveau. Exemple typique : une grosse caisse ou une guitare 7 cordes très grave ne fait plus baisser les cymbales et la voix. Le limiteur principal reste derrière et garantit toujours le plafond."))
+f.append(P("Avec <b>MULTIBAND</b>, le signal est partagé en 4 bandes à <b>reconstruction parfaite</b> : chaque bande est soustraite du reste, si bien que la somme redonne exactement le signal d'entrée, sans rotation de phase (une rotation de phase ferait monter les crêtes des attaques et coûterait de la sonie). LMix suit la part <b>tenue</b> de la réduction nécessaire (attaque 25 ms, retour 300 ms) et la confie à la bande qui porte le plus d'énergie ; les autres bandes en prennent en proportion. Le limiteur principal garde les crêtes et garantit toujours le plafond. Exemple typique : une grosse caisse ou une guitare 7 cordes très grave ne fait plus baisser les cymbales et la voix (sur la musique de test, environ 1 dB d'aigus préservé)."))
 f.append(img(mbshot, W)); f.append(P("Mode multibande (preset Metal Master) : les bandes LOW et LOW MID prennent la réduction, l'aigu reste presque intact.", "small"))
 f += bullets(["L'écran se partage : historique en haut, bandes en bas avec leur réduction en direct.",
               "<b>Glisser une poignée</b> (110 Hz, 900 Hz…) déplace une fréquence de coupure : 40 à 600 Hz, 300 Hz à 4 kHz et 2 à 16 kHz, toujours dans l'ordre. Elles sont aussi automatisables (Crossover Low / Mid / High).",
@@ -302,12 +311,13 @@ f += bullets(["Mettez LMix <b>en dernier</b>. Faites l'égalisation (QMix) et la
 f.append(KeepTogether([P("13. Caractéristiques techniques", "h1"), table([
     ["Format", "VST3 (Windows 64 bits, macOS universel), mono ou stéréo"],
     ["Plafond", "−30 à 0 dB, true peak (BS.1770-4 + interpolateur 8x de 192 coefficients) ou crête d'échantillon ; garanti par construction"],
-    ["Limiteur", "deux enveloppes (rapide avec avance 0 à 5 ms, lente de nivellement), lissage par minimum glissant + double moyenne, relâchement adaptatif selon le facteur de crête, genou doux selon le style"],
-    ["Suréchantillonnage", "1x à 32x, filtres demi-bande RIF à phase linéaire ; latence 8,5 à 10,1 ms selon le facteur et la fréquence d'échantillonnage"],
-    ["Multibande", "4 bandes Linkwitz-Riley 24 dB/oct (somme plate), avance 2 ms, réduction pondérée par la crête de chaque bande"],
+    ["Limiteur", "deux enveloppes (rapide avec avance 0 à 5 ms et maintien calé sur la demi-période du grave, lente de nivellement), détection des crêtes entre échantillons, lissage par minimum glissant + double moyenne, relâchement adaptatif selon le facteur de crête, genou doux selon le style"],
+    ["Suréchantillonnage", "1x à 32x, filtres demi-bande RIF à phase linéaire, pour l'écrêteur et pour le limiteur ; latence 8,5 à 11,6 ms selon le facteur et la fréquence d'échantillonnage"],
+    ["Multibande", "4 bandes à reconstruction parfaite (Linkwitz-Riley 24 dB/oct soustractifs), avance 2 ms, réduction lente répartie selon l'énergie de chaque bande"],
+    ["Distorsion", "THD+N à 6 dB de réduction : −72 dB (40 Hz), −81 dB (100 Hz), −89 dB (1 kHz) en Modern, 4x"],
     ["Mesures", "EBU R128 / BS.1770-4 : momentanée, court terme, intégrée (seuils −70 / −10), LRA (EBU Tech 3342), true peak, PLR ; historique 200 points/s"],
-    ["Sortie", "filtre DC 5 Hz, UNITY, DELTA, dither TPDF 16 / 24 bits avec mise en forme du bruit (5 coefficients)"],
-    ["Charge processeur", "environ 6 % d'un cœur à 4x, 9 % à 8x, 25 % à 32x (48 kHz, mesure indicative)"],
+    ["Sortie", "filtre DC 5 Hz, UNITY, DELTA, dither TPDF 16 / 24 bits avec mise en forme du bruit (5 coefficients) ; avec le dither, le plafond garde 2 pas de quantification de marge"],
+    ["Charge processeur", "environ 7 % d'un cœur à 4x, 10 % à 8x, 31 % à 32x (48 kHz, mesure indicative)"],
     ["MIDI", "MIDI Learn sur tous les réglages, aucun CC par défaut"],
     ["Fenêtre", "60 / 75 / 100 %, jusqu'à 150 %, jamais sous 60 % ; anti-gel v2 sous Windows"]],
     [30 * mm, W - 30 * mm], header=False)]))

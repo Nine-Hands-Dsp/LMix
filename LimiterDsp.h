@@ -11,9 +11,10 @@
 //
 //  Chaîne (par échantillon) :
 //    GAIN -> filtre DC -> ENHANCE (compression vers le haut des détails faibles)
-//    -> étage multibande (option, 4 bandes Linkwitz-Riley, réduction pondérée par bande)
-//    -> suréchantillonnage (dans le processeur) -> écrêteur doux (CLIP)
-//    -> limiteur principal à deux enveloppes (rapide + lente) avec avance (lookahead)
+//    -> étage multibande (option, 4 bandes à reconstruction parfaite, réduction lente confiée à la bande dominante)
+//    -> écrêteur doux (CLIP) dans son propre étage suréchantillonné, seulement au-dessus du niveau nivelé
+//    -> limiteur principal suréchantillonné à deux enveloppes (rapide avec maintien calé sur le grave + lente),
+//       avance (lookahead) et détection des crêtes entre échantillons
 //    -> sous-échantillonnage -> étage de sécurité true peak (crêtes entre échantillons, 4x)
 //
 //  Garantie de plafond : chaque étage « avance » suit la même construction :
@@ -57,19 +58,20 @@ namespace lmix
         double fastRelMul;    // relâchement rapide = RELEASE x fastRelMul
         double clipAdd;       // écrêtage interne (0..1), ajouté au potard CLIP
         double transAdd;      // détection de transitoires interne (0..1), ajoutée au potard TRANSIENT
+        double holdMaxMs;     // maintien maximal de l'enveloppe rapide (suit la demi-période du grave)
     };
     inline StyleSpec styleSpec (int s)
     {
         static const StyleSpec t[numStyles] = {
-            //  knee  slow  sAtk  sRel  fRel  clip  trans
-            { 0.0, 0.90, 60.0, 9.0, 0.45, 0.00, 0.00 },  // Transparent
-            { 0.0, 0.50, 25.0, 4.0, 0.15, 0.00, 0.60 },  // Punch
-            { 3.0, 0.30, 40.0, 6.0, 0.30, 0.00, 0.25 },  // Dynamic
-            { 0.0, 0.70, 15.0, 2.5, 0.08, 0.30, 0.10 },  // Loud
-            { 2.0, 0.80, 30.0, 3.0, 0.60, 0.00, 0.00 },  // Bus
-            { 0.0, 1.00, 80.0, 12.0, 1.20, 0.00, 0.00 }, // Safe
-            { 0.0, 0.75, 20.0, 3.5, 0.12, 0.20, 0.40 },  // Modern
-            { 0.0, 0.40, 8.0, 1.5, 0.05, 0.50, 0.20 },   // Aggressive
+            //  knee  slow  sAtk  sRel  fRel  clip  trans hold
+            { 0.0, 0.90, 60.0, 9.0, 0.45, 0.00, 0.00, 28.0 },  // Transparent
+            { 0.0, 0.50, 25.0, 4.0, 0.15, 0.00, 0.60, 12.0 },  // Punch
+            { 3.0, 0.30, 40.0, 6.0, 0.30, 0.00, 0.25, 22.0 },  // Dynamic
+            { 0.0, 0.70, 15.0, 2.5, 0.08, 0.30, 0.10, 16.0 },  // Loud
+            { 2.0, 0.80, 30.0, 3.0, 0.60, 0.00, 0.00, 28.0 },  // Bus
+            { 0.0, 1.00, 80.0, 12.0, 1.20, 0.00, 0.00, 30.0 }, // Safe
+            { 0.0, 0.75, 20.0, 3.5, 0.12, 0.20, 0.40, 20.0 },  // Modern
+            { 0.0, 0.40, 8.0, 1.5, 0.05, 0.50, 0.20, 9.0 },    // Aggressive
         };
         return t[std::clamp (s, 0, numStyles - 1)];
     }
@@ -263,13 +265,6 @@ namespace lmix
             hp1.tick (x, ch, t, h); hp2.tick (h, ch, t, hi);
         }
     };
-    struct LR4Allpass
-    {
-        LR4 f;
-        void set (double fc, double fs) { f.set (fc, fs); }
-        void reset() { f.reset(); }
-        double tick (double x, int ch) { double lo, hi; f.split (x, ch, lo, hi); return lo + hi; }
-    };
 
     //==========================================================================
     //  Étage multibande (taux de base) : 4 bandes, la réduction suit la bande qui dépasse
@@ -282,18 +277,19 @@ namespace lmix
         {
             fs = fs_; la = std::max (1, lookaheadSamples);
             for (int c = 0; c < 2; ++c) for (int b = 0; b < kBands; ++b) { dl[c][b].prepare (la + 4); dl[c][b].setDelay (la); }
-            for (auto& d : refDl) { d.prepare (la + 4); d.setDelay (la); }
             for (auto& d : plainDl) { d.prepare (la + 4); d.setDelay (la); }
             for (auto& d : plainRefDl) { d.prepare (la + 4); d.setDelay (la); }
             aMix = 1.0 - std::exp (-1.0 / (0.03 * fs));
+            aA = 1.0 - std::exp (-1.0 / (0.0005 * fs)); aR = 1.0 - std::exp (-1.0 / (0.060 * fs));
+            aW = 1.0 - std::exp (-1.0 / (0.030 * fs));
+            aSA = 1.0 - std::exp (-1.0 / (tune[2] * 0.001 * fs)); aSR = 1.0 - std::exp (-1.0 / (tune[3] * 0.001 * fs));
             gainLa.prepare (la + 2, 0); gainLa.setup (la + 1, 0, 1.0);
             reset();
         }
         void reset()
         {
-            x1.reset(); x2.reset(); x3.reset(); ap1.reset(); ap3.reset(); r1.reset(); r2.reset(); r3.reset(); rap1.reset(); rap3.reset();
+            x1.reset(); x2.reset(); x3.reset();
             for (int c = 0; c < 2; ++c) for (int b = 0; b < kBands; ++b) dl[c][b].clear();
-            for (auto& d : refDl) d.clear();
             for (auto& d : plainDl) d.clear();
             for (auto& d : plainRefDl) d.clear();
             for (auto& e : env) e = 0;
@@ -306,8 +302,7 @@ namespace lmix
             f1 = std::clamp (f1, 20.0, 18000.0); f2 = std::clamp (f2, f1 * 1.25, 19000.0); f3 = std::clamp (f3, f2 * 1.25, 19500.0);
             if (f1 == c1 && f2 == c2 && f3 == c3) return;
             c1 = f1; c2 = f2; c3 = f3;
-            x1.set (c1, fs); x2.set (c2, fs); x3.set (c3, fs); ap1.set (c1, fs); ap3.set (c3, fs);
-            r1.set (c1, fs); r2.set (c2, fs); r3.set (c3, fs); rap1.set (c1, fs); rap3.set (c3, fs);
+            x1.set (c1, fs); x2.set (c2, fs); x3.set (c3, fs);
         }
         // ceilingLin : plafond ; on : réduction active (sinon simple filtre passe-tout + retard)
         // ref : sortie de référence (même phase, sans réduction) pour l'écoute DELTA
@@ -323,56 +318,45 @@ namespace lmix
                 bandsIdle = true;
                 return;
             }
-            if (bandsIdle) { bandsIdle = false; x1.reset(); x2.reset(); x3.reset(); ap1.reset(); ap3.reset(); r1.reset(); r2.reset(); r3.reset(); rap1.reset(); rap3.reset(); }
+            if (bandsIdle) { bandsIdle = false; x1.reset(); x2.reset(); x3.reset(); }
             const double plain[2] = { plainDl[0].push ((float) L), plainDl[1].push ((float) R) };
-            const double plainRef[2] = { plainRefDl[0].push ((float) refL), plainRefDl[1].push ((float) refR) };
+            // séparation à reconstruction parfaite : chaque bande est soustraite du reste, la somme des 4 bandes
+            // redonne exactement l'entrée (aucune rotation de phase, donc aucune crête en plus quand rien n'est réduit)
             double in[2] = { L, R }, band[2][kBands];
             for (int c = 0; c < 2; ++c)
             {
-                double lo, hi, b0, b1, b2, b3;
-                x2.split (in[c], c, lo, hi);
-                x1.split (ap3.tick (lo, c), c, b0, b1);
-                x3.split (ap1.tick (hi, c), c, b2, b3);
-                band[c][0] = b0; band[c][1] = b1; band[c][2] = b2; band[c][3] = b3;
+                double lo, hi;
+                x1.split (in[c], c, lo, hi);  band[c][0] = lo; double rest = in[c] - lo;
+                x2.split (rest, c, lo, hi);   band[c][1] = lo; rest -= lo;
+                x3.split (rest, c, lo, hi);   band[c][2] = lo; band[c][3] = rest - lo;
             }
-            // référence (sans réduction) : même chaîne de filtres
-            double ref[2] = { refL, refR };
-            for (int c = 0; c < 2; ++c)
-            {
-                double lo, hi, b0, b1, b2, b3;
-                r2.split (ref[c], c, lo, hi);
-                r1.split (rap3.tick (lo, c), c, b0, b1);
-                r3.split (rap1.tick (hi, c), c, b2, b3);
-                ref[c] = refDl[c].push ((float) (b0 + b1 + b2 + b3));
-            }
-            refL = plainRef[0] + (ref[0] - plainRef[0]) * mix; refR = plainRef[1] + (ref[1] - plainRef[1]) * mix;
+            refL = plainRefDl[0].push ((float) refL); refR = plainRefDl[1].push ((float) refR);    // référence : simple retard
 
-            // poids des bandes : enveloppe de crête (attaque 0,5 ms, relâchement 60 ms)
-            const double aA = 1.0 - std::exp (-1.0 / (0.0005 * fs)), aR = 1.0 - std::exp (-1.0 / (0.060 * fs));
-            double wMax = 1e-12;
+            // enveloppes de crête des bandes (attaque 0,5 ms, relâchement 60 ms)
+            double eSum = 1e-12, e2Sum = 1e-24;
             for (int b = 0; b < kBands; ++b)
             {
                 const double p = std::max (std::abs (band[0][b]), std::abs (band[1][b]));
                 env[b] += (p - env[b]) * (p > env[b] ? aA : aR);
-                wMax = std::max (wMax, env[b]);
+                eSum += env[b]; e2Sum += env[b] * env[b];
             }
-            // réduction large bande requise (somme), avec relâchement (80 ms)
+            // réduction large bande requise par la somme, suivie par une enveloppe LENTE : le multibande ne prend que
+            // la part tenue de la réduction (celle qui fait pomper le reste du spectre), le limiteur principal garde les crêtes
             const double peak = std::max (std::abs (L), std::abs (R));
             const double need = peak > ceilingLin ? gainToDb (peak / ceilingLin) : 0.0;
-            const double aRel = 1.0 - std::exp (-1.0 / (0.080 * fs));
-            relEnv = need > relEnv ? need : relEnv + (need - relEnv) * aRel;
-            const double g = gainLa.push (dbToGain (-relEnv));        // avance : lissée, alignée sur les bandes retardées
-            const double grDb = -gainToDb (g);
-            const double aW = 1.0 - std::exp (-1.0 / (0.010 * fs));
+            relEnv += (need - relEnv) * (need > relEnv ? aSA : aSR);
+            const double g = gainLa.push (std::exp (-0.11512925 * relEnv * tune[0]));
+            const double G = -gainToDb (g);
+            // répartition : la bande qui porte le plus d'énergie prend toute cette réduction, les autres en proportion
+            double wMax = 1e-24;
+            for (int b = 0; b < kBands; ++b) { const double w = env[b] * env[b] / e2Sum; wSm[b] += (w - wSm[b]) * aW; wMax = std::max (wMax, wSm[b]); }
+            double gb[kBands];
+            for (int b = 0; b < kBands; ++b) gb[b] = std::exp (-0.11512925 * G * (wSm[b] / wMax) * mix);    // exposant de répartition = 1
             double outv[2] = { 0, 0 };
             for (int b = 0; b < kBands; ++b)
             {
-                // la bande dominante prend toute la réduction, les autres en proportion de leur crête
-                const double w = std::pow (env[b] / wMax, 1.5);
-                wSm[b] += (w - wSm[b]) * aW;
-                const double gb = dbToGain (-grDb * wSm[b] * mix);
-                bandGrDb[b] = grDb * wSm[b] * mix;
-                for (int c = 0; c < 2; ++c) outv[c] += dl[c][b].push ((float) band[c][b]) * gb;
+                bandGrDb[b] = -gainToDb (gb[b]);
+                for (int c = 0; c < 2; ++c) outv[c] += dl[c][b].push ((float) band[c][b]) * gb[b];
             }
             L = plain[0] + (outv[0] - plain[0]) * mix; R = plain[1] + (outv[1] - plain[1]) * mix;
         }
@@ -381,9 +365,10 @@ namespace lmix
         double c1 = -1, c2 = -1, c3 = -1;
     private:
         double fs = 48000; int la = 96;
-        LR4 x1, x2, x3, r1, r2, r3; LR4Allpass ap1, ap3, rap1, rap3;
-        Delay dl[2][kBands], refDl[2], plainDl[2], plainRefDl[2];
-        double env[kBands] {}, wSm[kBands] {}, relEnv = 0, mix = 0, aMix = 0.001;
+        LR4 x1, x2, x3;
+        Delay dl[2][kBands], plainDl[2], plainRefDl[2];
+        double env[kBands] {}, wSm[kBands] {}, relEnv = 0, mix = 0, aMix = 0.001, aA = 0.04, aR = 3e-4, aSA = 1e-3, aSR = 1e-4, aW = 2e-3;
+        const double tune[4] = { 0.8, 1.0, 25.0, 300.0 };   // part de la réduction tenue, (exposant), attaque (ms), relâchement (ms)
         bool bandsIdle = true;
         LookaheadGain gainLa;
     };
@@ -404,94 +389,122 @@ namespace lmix
         double clip = 0.0;            // 0..1
     };
 
+    //==========================================================================
+    //  Écrêteur doux (étage suréchantillonné à part, avant le limiteur)
+    //  Il ne coupe que ce qui dépasse le niveau déjà nivelé par l'enveloppe lente :
+    //  les crêtes courtes (attaques), jamais un son tenu.
+    //==========================================================================
+    class SoftClipper
+    {
+    public:
+        void setParams (const MainParams& p)
+        {
+            const auto st = styleSpec (p.style);
+            amount = std::clamp (p.clip + st.clipAdd * (1.0 - p.clip), 0.0, 1.0);
+            thr = p.ceilingLin * dbToGain ((1.0 - amount) * 6.0);
+            kneeFrac = 0.62 + 0.23 * (1.0 - amount);
+        }
+        bool active() const { return amount > 0.001; }
+        // raiseDb : réduction déjà portée par l'enveloppe lente (le seuil monte d'autant)
+        void process (float* L, float* R, int n, double raiseFromDb, double raiseToDb)
+        {
+            if (! active()) return;
+            for (int i = 0; i < n; ++i)
+            {
+                const double r = raiseFromDb + (raiseToDb - raiseFromDb) * (i + 1) / n;
+                const double t = thr * std::exp (0.11512925 * r), k0 = t * kneeFrac, span = t - k0, inv = 1.0 / span;
+                for (float* x : { L + i, R + i })
+                {
+                    const double a = std::abs ((double) *x);
+                    if (a > k0) *x = (float) ((*x < 0 ? -1.0 : 1.0) * (k0 + span * std::tanh ((a - k0) * inv)));
+                }
+            }
+        }
+        double amount = 0;
+    private:
+        double thr = 1, kneeFrac = 0.8;
+    };
+
+    //==========================================================================
+    //  Limiteur principal (au taux suréchantillonné) : deux enveloppes + avance garantie
+    //==========================================================================
     class MainLimiter
     {
     public:
+        static constexpr int W = 1;     // une crête entre deux échantillons touche les deux voisins
         // fsOs : fréquence suréchantillonnée ; os : facteur ; maxDelay : avance maximale (échantillons suréchantillonnés)
         void prepare (double fsOs_, int os_, int maxDelay)
         {
-            fsOs = fsOs_; os = std::max (1, os_); Dmax = std::max (1, maxDelay);
+            fsOs = fsOs_; os = std::max (1, os_); Dmax = std::max (4, maxDelay);
             for (auto& d : dl) d.prepare (Dmax + 4);
-            for (auto& g : la) g.prepare (Dmax + 2, 0);
+            for (auto& g : la) g.prepare (Dmax + 2, W);
             const double fsB = fsOs / os;
             cF03 = coefAt (0.3, fsB); cF8 = coefAt (8.0, fsB); cS40 = coefAt (40.0, fsB); c300 = coefAt (300.0, fsB);
             d300 = std::exp (-1.0 / (0.3 * fsB));
+            cLp = 1.0 - std::exp (-2.0 * kPi * 150.0 / fsB);
+            cLf = coefAt (120.0, fsB);
+            fsBase = fsB;
             cAtk = -1; reset();
         }
         void reset()
         {
             for (auto& d : dl) d.clear();
-            for (int c = 0; c < 2; ++c) { eF[c] = eS[c] = 0; fastEnv[c] = slowEnv[c] = rmsEnv[c] = pkEnv[c] = 1e-9; lastGr[c] = 0; tr[c] = 0; aFR[c] = 1e-4; detPk[c] = 0; }
+            for (int c = 0; c < 2; ++c) { eF[c] = eS[c] = 0; fastEnv[c] = slowEnv[c] = rmsEnv[c] = pkEnv[c] = 1e-9; lastGr[c] = 0; tr[c] = 0; aFR[c] = 1e-4; detPk[c] = 0; hold[c] = 0; }
+            lp1 = lp2 = 0; lastSign = 0; sinceCross = 0; halfMs = 10.0; lfPow = allPow = 1e-12; holdN = 0;
             curL = -1; tick = 0;
         }
         int delay() const { return Dmax; }
 
-        // un échantillon suréchantillonné ; sort l'échantillon retardé de Dmax, limité
-        void process (double& L, double& R, const MainParams& p)
+        // une fois par bloc
+        void setParams (const MainParams& p)
         {
-            const int Lw = std::clamp ((int) std::lround (p.lookaheadMs * 0.001 * fsOs), 0, Dmax);
+            const int Lw = std::clamp ((int) std::lround (p.lookaheadMs * 0.001 * fsOs), 0, Dmax - 2 * W - 1);
             if (Lw != curL)
             {
                 curL = Lw;
                 const double fill = std::exp (-0.11512925 * std::max (lastGr[0], lastGr[1]));
-                for (auto& g : la) g.setup (Lw + 1, 0, fill);
+                for (auto& g : la) g.setup (Lw + 1, W, fill);
+                tap = Dmax - Lw - W;                                      // voir LookaheadGain : T = Dmax - S + 1 - W
             }
-            if (p.attack != cAtk || p.releaseMs != cRel || p.style != cStyle || p.autoRelease != cAuto || p.clip != cClip || p.transient != cTrans || p.ceilingLin != cCeil)
+            linkTrans = p.linkTrans; linkRel = p.linkRel;
+            if (p.attack != cAtk || p.releaseMs != cRel || p.style != cStyle || p.autoRelease != cAuto || p.transient != cTrans || p.ceilingLin != cCeil)
             {
-                cAtk = p.attack; cRel = p.releaseMs; cStyle = p.style; cAuto = p.autoRelease; cClip = p.clip; cTrans = p.transient; cCeil = p.ceilingLin;
+                cAtk = p.attack; cRel = p.releaseMs; cStyle = p.style; cAuto = p.autoRelease; cTrans = p.transient; cCeil = p.ceilingLin;
                 st = styleSpec (p.style);
                 const double atkMul = std::pow (4.0, (p.attack - 0.5) * 2.0);
                 aSA = coefAt (st.slowAtkMs * atkMul, fsOs);
                 aSR = coefAt (p.releaseMs * st.slowRelMul, fsOs);
                 fRelMs = std::max (1.0, p.releaseMs * st.fastRelMul);
-                clipAmt = std::clamp (p.clip + st.clipAdd * (1.0 - p.clip), 0.0, 1.0);
                 trAmt = std::clamp (p.transient + st.transAdd * (1.0 - p.transient), 0.0, 1.0);
                 cdb = gainToDb (p.ceilingLin);
                 kneeLin = p.ceilingLin * dbToGain (-st.kneeDb);
-                clipThr = p.ceilingLin * dbToGain ((1.0 - clipAmt) * 6.0);
-                clipK0 = clipThr * (0.55 + 0.25 * (1.0 - clipAmt));
             }
-            // écrêteur doux : seuil entre +6 dB au-dessus du plafond (peu) et le plafond (beaucoup)
-            double x[2] = { L, R };
-            if (clipAmt > 0.001)
-                for (auto& v : x)
-                {
-                    const double a = std::abs (v);
-                    if (a > clipK0) v = (v < 0 ? -1.0 : 1.0) * (clipK0 + (clipThr - clipK0) * std::tanh ((a - clipK0) / (clipThr - clipK0)));
-                }
-            // détection sur l'échantillon retardé de (Dmax - Lw)
-            double det[2];
-            for (int c = 0; c < 2; ++c) { dl[c].write ((float) x[c]); det[c] = dl[c].tap (Dmax - Lw); detPk[c] = std::max (detPk[c], std::abs (det[c])); }
+        }
 
-            // calculs lents (transitoires, relâchement automatique) une fois par échantillon de base
-            if (++tick >= os)
+        // un échantillon suréchantillonné ; sort l'échantillon retardé de Dmax, limité
+        void process (double& L, double& R)
+        {
+            dl[0].write ((float) L); dl[1].write ((float) R);
+            // détection : échantillon p (retard tap) et ses voisins, pour estimer la crête entre les échantillons
+            double det[2], sgn[2];
+            for (int c = 0; c < 2; ++c)
             {
-                tick = 0;
-                for (int c = 0; c < 2; ++c)
+                const double y0 = std::abs (dl[c].tap (tap + 1)), x1 = dl[c].tap (tap), y1 = std::abs (x1), y2 = std::abs (dl[c].tap (tap - 1));
+                double pk = y1;
+                if (y1 >= y0 && y1 >= y2)                                    // maximum local : sommet de la parabole
                 {
-                    const double a = detPk[c]; detPk[c] = 0;
-                    fastEnv[c] += (a - fastEnv[c]) * (a > fastEnv[c] ? cF03 : cF8);
-                    slowEnv[c] += (a - slowEnv[c]) * cS40;
-                    const double rise = gainToDb (fastEnv[c] + 1e-9) - gainToDb (slowEnv[c] + 1e-9);
-                    tr[c] = trAmt * std::clamp ((rise - 3.0) / 9.0, 0.0, 1.0);
-                    double relMs = fRelMs;
-                    if (cAuto)
-                    {
-                        pkEnv[c] = std::max (a, pkEnv[c] * d300);
-                        rmsEnv[c] += (a * a - rmsEnv[c]) * c300;
-                        const double crest = gainToDb (pkEnv[c] + 1e-9) - 0.5 * gainToDb (rmsEnv[c] + 1e-18);
-                        // musique dense (facteur de crête faible) : relâchement plus long ; transitoires isolées : plus court
-                        relMs *= std::clamp (std::pow (2.0, (12.0 - crest) / 6.0), 0.35, 3.0);
-                    }
-                    relMs /= (1.0 + 4.0 * tr[c]);
-                    aFR[c] = coefAt (relMs, fsOs);
+                    const double den = y0 - 2.0 * y1 + y2;
+                    if (den < -1e-12) pk = y1 - (y0 - y2) * (y0 - y2) / (8.0 * den);
                 }
+                det[c] = pk; sgn[c] = x1;
+                detPk[c] = std::max (detPk[c], y1);
             }
+            if (++tick >= os) { tick = 0; slowTick (0.5 * (sgn[0] + sgn[1])); }
 
             double t[2], env[2];
             for (int c = 0; c < 2; ++c)
             {
-                const double a = std::abs (det[c]);
+                const double a = det[c];
                 double req = 0.0;
                 if (a > kneeLin)
                 {
@@ -505,8 +518,9 @@ namespace lmix
                 const double sTarget = req * st.slowAmt;
                 if (sTarget > eS[c]) eS[c] += (sTarget - eS[c]) * aSA * (1.0 - tr[c]);
                 else                 eS[c] += (sTarget - eS[c]) * aSR;
-                // enveloppe rapide : attaque immédiate (l'avance la lisse), relâche vers l'enveloppe lente
-                if (req > eF[c]) eF[c] = req;
+                // enveloppe rapide : attaque immédiate (l'avance la lisse), maintien d'une demi-période du grave, puis relâchement vers l'enveloppe lente
+                if (req >= eF[c]) { eF[c] = req; hold[c] = holdN; }
+                else if (hold[c] > 0) --hold[c];
                 else { const double fl = std::max (eS[c], req); eF[c] += (fl - eF[c]) * aFR[c]; }
                 env[c] = std::max (eF[c], eS[c]);
             }
@@ -515,8 +529,8 @@ namespace lmix
             double g[2];
             for (int c = 0; c < 2; ++c)
             {
-                const double rel = env[c] + (eLink - env[c]) * p.linkRel;
-                const double trn = t[c] + (tLink - t[c]) * p.linkTrans;
+                const double rel = env[c] + (eLink - env[c]) * linkRel;
+                const double trn = t[c] + (tLink - t[c]) * linkTrans;
                 const double gr = std::max ({ rel, trn, t[c] });
                 lastGr[c] = gr;
                 g[c] = la[c].push (gr > 1e-7 ? std::exp (-0.11512925 * gr) : 1.0);
@@ -527,15 +541,63 @@ namespace lmix
         }
         // plus petit gain appliqué depuis la dernière lecture (affichage)
         double takeMinGain() { const double v = gMin; gMin = 1.0; return v; }
+        // réduction portée par l'enveloppe lente (dB) : sert de référence à l'écrêteur
+        double slowGrDb() const { return std::max (eS[0], eS[1]) * (1.0 - 0.5 * linkRel) + std::min (eS[0], eS[1]) * 0.5 * linkRel; }
+        double holdMs() const { return 1000.0 * holdN / fsOs; }
     private:
+        // une fois par échantillon de base : transitoires, relâchement automatique, période du grave
+        void slowTick (double mono)
+        {
+            for (int c = 0; c < 2; ++c)
+            {
+                const double a = detPk[c]; detPk[c] = 0;
+                fastEnv[c] += (a - fastEnv[c]) * (a > fastEnv[c] ? cF03 : cF8);
+                slowEnv[c] += (a - slowEnv[c]) * cS40;
+                const double rise = gainToDb (fastEnv[c] + 1e-9) - gainToDb (slowEnv[c] + 1e-9);
+                tr[c] = trAmt * std::clamp ((rise - 3.0) / 9.0, 0.0, 1.0);
+                double relMs = fRelMs;
+                if (cAuto)
+                {
+                    pkEnv[c] = std::max (a, pkEnv[c] * d300);
+                    rmsEnv[c] += (a * a - rmsEnv[c]) * c300;
+                    const double crest = gainToDb (pkEnv[c] + 1e-9) - 0.5 * gainToDb (rmsEnv[c] + 1e-18);
+                    // musique dense (facteur de crête faible) : relâchement plus long ; transitoires isolées : plus court
+                    relMs *= std::clamp (std::pow (2.0, (12.0 - crest) / 6.0), 0.35, 3.0);
+                }
+                relMs /= (1.0 + 4.0 * tr[c]);
+                aFR[c] = coefAt (relMs, fsOs);
+            }
+            // grave : passe-bas 150 Hz (2 pôles) ; demi-période mesurée entre deux passages par zéro
+            lp1 += (mono - lp1) * cLp; lp2 += (lp1 - lp2) * cLp;
+            lfPow += (lp2 * lp2 - lfPow) * cLf; allPow += (mono * mono - allPow) * cLf;
+            ++sinceCross;
+            const int sg = lp2 > 1e-6 ? 1 : lp2 < -1e-6 ? -1 : 0;
+            if (sg != 0 && sg != lastSign)
+            {
+                if (lastSign != 0)
+                {
+                    const double ms = 1000.0 * sinceCross / fsBase;
+                    if (ms > 1.0 && ms < 40.0) halfMs += (ms - halfMs) * 0.25;
+                }
+                lastSign = sg; sinceCross = 0;
+            }
+            // maintien = 1,15 demi-période du grave quand le grave domine, réduit sur les transitoires
+            const double lfShare = lfPow / (allPow + 1e-18);
+            const double want = lfShare > 0.15 ? std::min (st.holdMaxMs, 1.15 * halfMs) : 1.0;
+            const double trMax = std::max (tr[0], tr[1]);
+            holdN = (int) std::lround (want * (1.0 - 0.7 * trMax) * 0.001 * fsOs);
+        }
         static double coefAt (double ms, double fs) { const double x = 1.0 / (std::max (0.01, ms) * 0.001 * fs); return x > 0.05 ? 1.0 - std::exp (-x) : x * (1.0 - 0.5 * x); }
-        double fsOs = 192000; int os = 4, Dmax = 960, curL = -1, tick = 0;
+        double fsOs = 192000, fsBase = 48000; int os = 4, Dmax = 960, curL = -1, tick = 0, tap = 1;
         Delay dl[2];
         LookaheadGain la[2];
         StyleSpec st = styleSpec (modern);
         double eF[2] {}, eS[2] {}, fastEnv[2] {}, slowEnv[2] {}, rmsEnv[2] {}, pkEnv[2] {}, lastGr[2] {}, tr[2] {}, aFR[2] {}, detPk[2] {};
-        double cAtk = -1, cRel = -1, cClip = -1, cTrans = -1, cCeil = -1, aSA = 0, aSR = 0, fRelMs = 50, clipAmt = 0, trAmt = 0, cdb = 0, kneeLin = 1, clipThr = 1, clipK0 = 1;
-        double cF03 = 0, cF8 = 0, cS40 = 0, c300 = 0, d300 = 0, gMin = 1.0;
+        int hold[2] {}, holdN = 0;
+        double cAtk = -1, cRel = -1, cTrans = -1, cCeil = -1, aSA = 0, aSR = 0, fRelMs = 50, trAmt = 0, cdb = 0, kneeLin = 1;
+        double linkTrans = 1, linkRel = 0.5;
+        double cF03 = 0, cF8 = 0, cS40 = 0, c300 = 0, d300 = 0, gMin = 1.0, cLp = 0, cLf = 0;
+        double lp1 = 0, lp2 = 0, halfMs = 10, lfPow = 1e-12, allPow = 1e-12; int lastSign = 0; int64_t sinceCross = 0;
         int cStyle = -1; bool cAuto = false;
     };
 
@@ -569,8 +631,9 @@ namespace lmix
                 pk = std::max (pk, (double) std::abs (dl[c].tap (W)));
                 if (truePeak)
                 {
-                    float xs[TruePeak4x::kTaps];
-                    for (int k = 0; k < TruePeak4x::kTaps; ++k) xs[k] = dl[c].tap (W + 11 - k);  // x[p-11] .. x[p+12]
+                    float xs[TruePeak4x::kTaps], m = 0;
+                    for (int k = 0; k < TruePeak4x::kTaps; ++k) { xs[k] = dl[c].tap (W + 11 - k); m = std::max (m, std::abs (xs[k])); }  // x[p-11] .. x[p+12]
+                    if (m < 0.25 * ceilingLin) continue;       // à -12 dB du plafond, aucune crête entre échantillons ne peut l'atteindre en pratique
                     pk = std::max (pk, tp.peakBetween (xs));
                     // et la mesure officielle BS.1770 (lit un peu plus haut près de Nyquist) : x[p-5] .. x[p+6]
                     pk = std::max (pk, ItuTruePeak::peakBetween (xs + 6));
@@ -584,7 +647,7 @@ namespace lmix
             // garde finale (n'agit qu'en cas d'erreur d'arrondi)
             L = std::clamp (L, -ceilingLin, ceilingLin);
             R = std::clamp (R, -ceilingLin, ceilingLin);
-            grOut = -gainToDb (g);
+            grOut = g < 0.999999 ? -gainToDb (g) : 0.0;
             ++n;
         }
         void setRelease (double ms) { relC = 1.0 - std::exp (-1.0 / (ms * 0.001 * fs)); }

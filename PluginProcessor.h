@@ -98,6 +98,9 @@ public:
 
     int latencyFor (int osIdx) const;
 
+    // statistiques de mise au point (lues par tools/render)
+    double statSafetyMax = 0.0, statSafetySum = 0.0; int64_t statSafetyActive = 0, statSafety01 = 0, statSamples = 0;
+
 private:
     void timerCallback() override;          // file MIDI -> setValueNotifyingHost ; latence (thread de messages)
     std::atomic<float> pendingValue[kMaxParams];
@@ -105,13 +108,15 @@ private:
     std::atomic<int>   ccMin[128], ccMax[128];
 
     void configure (int osIdx);             // (re)construit la chaîne pour un facteur de suréchantillonnage
-    std::unique_ptr<juce::dsp::Oversampling<float>> osObj[6];
+    std::unique_ptr<juce::dsp::Oversampling<float>> osObj[6], clipOs[6];
     int activeOs = -1;
     double sr = 48000.0;
     int maxBlock = 512, Dbase = 240, fadeIn = 0;
 
     lmix::MultibandStage mbStage;
     lmix::MainLimiter main;
+    lmix::SoftClipper clipper;
+    double lastRaise = 0.0;
     lmix::SafetyLimiter safety;
     lmix::Dither dither;
     lmix::Delay refDl[2], dryDl[2];

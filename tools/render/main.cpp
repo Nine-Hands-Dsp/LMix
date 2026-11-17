@@ -50,6 +50,105 @@ static double ownTP (const std::vector<float>& x)
     return m;
 }
 
+
+//------------------------------------------------------------------ analyse de qualité (tools/render analyse)
+static double thdN (const std::vector<float>& y, double fs, double f0, double fmax = 20000.0)
+{
+    const int order = 16, N = 1 << order;
+    dsp::FFT fft (order);
+    std::vector<float> buf ((size_t) N * 2, 0.0f);
+    const size_t off = y.size() - (size_t) N;
+    for (int n = 0; n < N; ++n)
+    {
+        const double w = 0.35875 - 0.48829 * std::cos (2 * MathConstants<double>::pi * n / N) + 0.14128 * std::cos (4 * MathConstants<double>::pi * n / N) - 0.01168 * std::cos (6 * MathConstants<double>::pi * n / N);
+        buf[(size_t) n] = (float) (y[off + (size_t) n] * w);
+    }
+    fft.performFrequencyOnlyForwardTransform (buf.data());
+    const double binHz = fs / N; const int k0 = (int) std::round (f0 / binHz);
+    double sig = 0, rest = 0;
+    for (int k = (int) (15.0 / binHz); k < (int) (fmax / binHz); ++k)
+    {
+        const double p = (double) buf[(size_t) k] * buf[(size_t) k];
+        if (std::abs (k - k0) <= 6) sig += p; else rest += p;
+    }
+    return 10 * std::log10 (rest / sig + 1e-30);
+}
+
+static void setPa (LmixProcessor& p, const char* id, float v) { auto* q = p.apvts.getParameter (id); q->setValueNotifyingHost (q->convertTo0to1 (v)); }
+
+static std::vector<float> runSine (int style, int os, double f, double overDb, double fs, int B, double secs = 4.0)
+{
+    LmixProcessor p; p.setPlayConfigDetails (2, 2, fs, B);
+    setPa (p, "style", (float) style); setPa (p, "os", (float) os); setPa (p, "ceiling", -1.0f);
+    p.prepareToPlay (fs, B);
+    MidiBuffer midi; AudioBuffer<float> buf (2, B); std::vector<float> out;
+    const double a = Decibels::decibelsToGain (-1.0 + overDb); double ph = 0;
+    for (int k = 0; k < (int) (secs * fs / B); ++k)
+    {
+        for (int i = 0; i < B; ++i) { const float v = (float) (a * std::sin (ph)); ph += 2 * MathConstants<double>::pi * f / fs; buf.setSample (0, i, v); buf.setSample (1, i, v); }
+        p.processBlock (buf, midi);
+        for (int i = 0; i < B; ++i) out.push_back (buf.getSample (0, i));
+    }
+    return out;
+}
+
+static void analyse (bool quick = false)
+{
+    const double fs = 48000.0; const int B = 512;
+    if (! quick) {
+    std::cout << "== THD+N, sinus 6 dB au-dessus du plafond, 4x ==\n";
+    for (int st = 0; st < lmix::numStyles; ++st)
+    {
+        std::cout << "  " << String (lmix::styleName (st)).paddedRight (' ', 11);
+        for (double f : { 40.0, 100.0, 1000.0 }) std::cout << "  " << f << " Hz " << String (thdN (runSine (st, 2, f, 6.0, fs, B), fs, f), 1) << " dB";
+        std::cout << "\n";
+    }
+    std::cout << "== Repliement : sinus 9 kHz +6 dB (Modern), THD+N 20 Hz-20 kHz selon OS ==\n ";
+    for (int os = 0; os < 6; ++os) std::cout << "  " << LmixProcessor::osFactor (os) << "x " << String (thdN (runSine (6, os, 9000.0, 6.0, fs, B), fs, 9000.0), 1);
+    std::cout << " dB\n";
+    }
+    std::cout << "== Musique +10 dB : activite de la securite, multibande, CPU ==\n";
+    for (int os : { 0, 2, 3, 5 })
+        for (int mb : { 0, 1 })
+        for (int stl : { 6, 0 })
+        {
+            if (stl == 0 && (mb == 1 || os == 5)) continue;
+            if (quick && (os != 2 || stl != 6)) continue;
+            LmixProcessor p; p.setPlayConfigDetails (2, 2, fs, B);
+            setPa (p, "gain", 10.0f); setPa (p, "os", (float) os); setPa (p, "mb", (float) mb); setPa (p, "style", (float) stl);
+            p.prepareToPlay (fs, B);
+            TestMusic tm (fs); MidiBuffer midi; AudioBuffer<float> buf (2, B);
+            // énergie au-dessus de 3 kHz : entrée (x gain) / sortie
+            double eiH = 0, eoH = 0, eiA = 0, eoA = 0; double hpI = 0, hpO = 0, xi1 = 0, xo1 = 0;
+            const double aHp = std::exp (-2 * MathConstants<double>::pi * 3000.0 / fs);
+            std::vector<float> dly ((size_t) p.getLatencySamples() + 1, 0.0f); size_t dp = 0;
+            double cpu = 0; const int blocks = (int) (10 * fs / B); double bgr[4] {}, mgr = 0; int nb = 0;
+            for (int k = 0; k < blocks; ++k)
+            {
+                float in[B];
+                for (int i = 0; i < B; ++i) { float a, b; tm.next (a, b); buf.setSample (0, i, a); buf.setSample (1, i, b); in[i] = a * 3.1623f; }
+                const double t0 = Time::getMillisecondCounterHiRes();
+                p.processBlock (buf, midi);
+                cpu += Time::getMillisecondCounterHiRes() - t0;
+                if (k > 40) { for (int q = 0; q < 4; ++q) bgr[q] += p.bandGr[q].load(); mgr += p.grNow.load(); ++nb; }
+                for (int i = 0; i < B; ++i)
+                {
+                    const float xi = dly[dp]; dly[dp] = in[i]; dp = (dp + 1) % dly.size();
+                    const double yo = buf.getSample (0, i);
+                    hpI = aHp * (hpI + xi - xi1); xi1 = xi; hpO = aHp * (hpO + yo - xo1); xo1 = yo;
+                    if (k > 40) { eiH += hpI * hpI; eoH += hpO * hpO; eiA += xi * xi; eoA += yo * yo; }
+                }
+            }
+            uint32_t h[lmix::Loudness::kBins]; lmix::Loudness::snapshot (p.loud.hist, h);
+            std::cout << "  " << String (lmix::styleName (stl)).paddedRight (' ', 11) << LmixProcessor::osFactor (os) << "x MB " << mb << "  securite active " << String (100.0 * p.statSafetyActive / jmax ((int64_t) 1, p.statSamples), 2)
+                      << " % (> 0,1 dB " << String (100.0 * p.statSafety01 / jmax ((int64_t) 1, p.statSamples), 2) << " %, moy " << String (p.statSafetySum / jmax ((int64_t) 1, p.statSafetyActive), 2) << ", max " << String (p.statSafetyMax, 2) << " dB)  sonie " << String (lmix::Loudness::integrated (h), 2)
+                      << " LUFS  reduction totale " << String (10 * std::log10 (eoA / eiA), 2) << " dB, aigus > 3 kHz " << String (10 * std::log10 (eoH / eiH), 2)
+                      << " dB  CPU " << String (cpu / 100.0, 1) << " %\n";
+            if (mb) std::cout << "      bandes " << String (bgr[0] / nb, 1) << " / " << String (bgr[1] / nb, 1) << " / " << String (bgr[2] / nb, 1) << " / " << String (bgr[3] / nb, 1) << " dB, limiteur " << String (mgr / nb, 1) << " dB\n";
+            else std::cout << "      limiteur " << String (mgr / nb, 1) << " dB\n";
+        }
+}
+
 static void snap (Component& c, const String& name, float scale)
 {
     auto img = c.createComponentSnapshot (c.getLocalBounds(), true, scale);
@@ -61,9 +160,11 @@ static void snap (Component& c, const String& name, float scale)
 
 static void setP (LmixProcessor& p, const char* id, float v) { auto* q = p.apvts.getParameter (id); q->setValueNotifyingHost (q->convertTo0to1 (v)); }
 
-int main (int argc, char**)
+int main (int argc, char** argv)
 {
     ScopedJuceInitialiser_GUI init;
+    if (argc > 1 && String (argv[1]) == "analyse") { analyse(); return 0; }
+    if (argc > 1 && String (argv[1]) == "mb") { analyse (true); return 0; }
     const bool shotsOnly = argc > 1;
     const double fs = 48000.0; const int B = 512;
     MidiBuffer midi;
