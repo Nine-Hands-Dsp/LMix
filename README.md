@@ -67,5 +67,6 @@ Il exporte aussi les captures de la notice.
 
 | Version | Changements |
 |---|---|
+| 1.1.2 | Menu Plugin size : sous-menu « Default size » pour choisir la taille d'ouverture des nouvelles fenêtres (60 / 75 / 100 %, commune à toutes les instances) ; ligne d'état sans scintillement (son opacité oscillait entre 100 et 89 % à chaque image) ; chiffres à chasse fixe, le texte ne bouge plus quand une valeur change. |
 | 1.1.0 | Moteur optimisé : maintien calé sur le grave (distorsion des basses divisée par plus de 100), écrêteur suréchantillonné à part qui ne coupe que les crêtes courtes, détection des crêtes entre échantillons dans le limiteur principal, multibande à reconstruction parfaite et nouvelle répartition, marge de dither, calculs par bloc. |
 | 1.0.0 | Première version. |

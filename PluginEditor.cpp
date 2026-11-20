@@ -1,4 +1,6 @@
 #include "PluginEditor.h"
+#include "NineHandsDefaultSize.h"
+#include "NineHandsStatusText.h"
 #include "BinaryData.h"
 
 using namespace juce;
@@ -722,7 +724,7 @@ LmixEditor::LmixEditor (LmixProcessor& p)
     setResizable (true, true);
     setResizeLimits (kW, kH, kMaxW, kMaxH);
     getConstrainer()->setFixedAspectRatio ((double) kW / kH);
-    setScaleIndex (proc.uiSizeIdx.load());
+    setScaleIndex (nhsize::openIndex ("LMix", proc.uiSizeIdx.load(), 3));   // taille de l'instance, sinon taille par défaut choisie
 
     for (auto* prm : proc.getParameters()) lastVals.push_back (prm->getValue());
     powerGlow = proc.prm.power->load() > 0.5f ? 1.0f : 0.0f;
@@ -831,7 +833,7 @@ void LmixEditor::paint (Graphics& g)
         if (statusAlpha > 0.01f)
         {
             g.setColour (col::accentHi.withAlpha (statusAlpha));
-            g.drawFittedText (status, p.reduced (p.getHeight() * 0.5f, 0).toNearestInt(), Justification::centred, 1, 0.6f);
+            nhstatus::draw (g, status, p.reduced (p.getHeight() * 0.5f, 0), Justification::centred);   // chiffres à chasse fixe
         }
     }
 
@@ -1157,8 +1159,16 @@ void LmixEditor::showMainMenu()
     if (proc.learnParam.load() >= 0) midi.addItem (161, "Cancel MIDI learn");
     midi.addItem (162, "Clear all MIDI");
     static const char* sz[3] = { "60 %", "75 %", "100 %" };
-    const int cur = jmax (0, proc.uiSizeIdx.load());
-    for (int i = 0; i < 3; ++i) size.addItem (170 + i, sz[i], true, cur == i);
+    const int defSz = nhsize::defaultIndex ("LMix", 3);
+    const int cur = nhsize::openIndex ("LMix", proc.uiSizeIdx.load(), 3);
+    PopupMenu defSizes;
+    for (int i = 0; i < 3; ++i)
+    {
+        size.addItem (170 + i, String (sz[i]) + (i == defSz ? "  (default)" : ""), true, cur == i);
+        defSizes.addItem (nhsize::idDefault + i, sz[i], true, i == defSz);
+    }
+    size.addSeparator();
+    size.addSubMenu ("Default size", defSizes);     // taille des nouvelles fenêtres, commune à toutes les instances
     for (int i = 0; i < 4; ++i) gl.addItem (180 + i, String ((i + 1) * 25) + " %", true, proc.glowIdx.load() == i);
     m.addSubMenu ("Presets", pres);
     m.addSubMenu ("Style", stl);
@@ -1192,7 +1202,8 @@ void LmixEditor::showMainMenu()
         else if (r >= 150 && r < 153) proc.historyIdx = r - 150;
         else if (r == 161) proc.learnParam = -1;
         else if (r == 162) for (auto& x : proc.ccMap) x = -1;
-        else if (r >= 170 && r < 173) { proc.uiSizeIdx = r == 170 ? -1 : r - 170; setScaleIndex (r - 170); }
+        else if (r >= 170 && r < 173) { proc.uiSizeIdx = r - 170; setScaleIndex (r - 170); }
+        else if (r >= nhsize::idDefault && r < nhsize::idDefault + 3) { nhsize::setDefaultIndex ("LMix", r - nhsize::idDefault); proc.uiSizeIdx = -1; setScaleIndex (r - nhsize::idDefault); }
         else if (r >= 180 && r < 184) proc.glowIdx = r - 180;
         repaint(); display.repaint(); meters.repaint();
     });
@@ -1292,8 +1303,8 @@ void LmixEditor::timerCallback()
 
     // fondus : ligne d'état et interrupteur
     const float target = (t - statusTime < 2.5) ? 1.0f : 0.0f;
-    const float na = target > statusAlpha ? jmin (1.0f, statusAlpha + 0.28f) : jmax (0.0f, statusAlpha - 0.11f);
-    if (std::abs (na - statusAlpha) > 0.001f) { statusAlpha = na; askRepaint (pill().expanded (4).toNearestInt()); }
+    const float na = target > statusAlpha ? jmin (target, statusAlpha + 0.28f) : jmax (target, statusAlpha - 0.11f);   // immobile une fois arrivé (sinon 100 / 89 % à chaque image = scintillement)
+    if (std::abs (na - statusAlpha) > 0.001f || (na > 0.0f && status != lastStatusDrawn)) { statusAlpha = na; lastStatusDrawn = status; askRepaint (pill().expanded (4).toNearestInt()); }
     const bool pw = proc.prm.power->load() > 0.5f;
     const float pg = pw ? jmin (1.0f, powerGlow + 0.45f) : jmax (0.0f, powerGlow - 0.28f);
     if (std::abs (pg - powerGlow) > 0.001f) { powerGlow = pg; askRepaint (powerRect().expanded (powerRect().getWidth()).toNearestInt()); }
